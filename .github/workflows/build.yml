@@ -1,0 +1,119 @@
+name: Build All Architectures
+
+on:
+  workflow_dispatch:  # 手动触发
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-android-binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-linux-android
+            abi: arm64-v8a
+          - arch: arm
+            target: armv7a-linux-androideabi
+            abi: armeabi-v7a
+          - arch: x86_64
+            target: x86_64-linux-android
+            abi: x86_64
+          - arch: x86
+            target: i686-linux-android
+            abi: x86
+
+    steps:
+    - name: Checkout cpuminer-scash
+      uses: actions/checkout@v3
+      with:
+        repository: scashnetwork/cpuminer-scash
+        submodules: recursive
+
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r25c
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y autoconf automake libtool pkg-config curl
+
+    - name: Build for ${{ matrix.arch }}
+      run: |
+        export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        export API=21
+        export CC=$TOOLCHAIN/bin/${{ matrix.target }}${API}-clang
+        export CXX=$TOOLCHAIN/bin/${{ matrix.target }}${API}-clang++
+        export AR=$TOOLCHAIN/bin/llvm-ar
+        export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+        export STRIP=$TOOLCHAIN/bin/llvm-strip
+
+        # Run autogen
+        ./autogen.sh
+
+        # Configure
+        if [ "${{ matrix.arch }}" = "arm" ]; then
+          CFLAGS="-O3 -march=armv7-a -mfpu=neon -mfloat-abi=softfp"
+        elif [ "${{ matrix.arch }}" = "arm64" ]; then
+          CFLAGS="-O3 -march=armv8-a"
+        else
+          CFLAGS="-O3"
+        fi
+
+        ./configure --host=${{ matrix.target }} \
+                    --with-crypto \
+                    --with-curl \
+                    CFLAGS="$CFLAGS" \
+                    CXXFLAGS="$CFLAGS" \
+                    LDFLAGS="-static-libstdc++"
+
+        # Build
+        make -j$(nproc) || make
+
+        # Strip binary
+        $STRIP minerd
+
+        # Rename
+        mkdir -p output/${{ matrix.abi }}
+        cp minerd output/${{ matrix.abi }}/libminerd.so
+
+    - name: Upload ${{ matrix.arch }} binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: cpuminer-scash-${{ matrix.abi }}
+        path: output/${{ matrix.abi }}/libminerd.so
+
+  # 合并所有架构到一个 artifact
+  combine-binaries:
+    needs: build-android-binaries
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: all-binaries
+
+    - name: Organize binaries
+      run: |
+        mkdir -p jniLibs/arm64-v8a
+        mkdir -p jniLibs/armeabi-v7a
+        mkdir -p jniLibs/x86_64
+        mkdir -p jniLibs/x86
+
+        cp all-binaries/cpuminer-scash-arm64-v8a/libminerd.so jniLibs/arm64-v8a/
+        cp all-binaries/cpuminer-scash-armeabi-v7a/libminerd.so jniLibs/armeabi-v7a/
+        cp all-binaries/cpuminer-scash-x86_64/libminerd.so jniLibs/x86_64/
+        cp all-binaries/cpuminer-scash-x86/libminerd.so jniLibs/x86/
+
+        # 显示文件大小
+        ls -lh jniLibs/*/
+
+    - name: Upload combined jniLibs
+      uses: actions/upload-artifact@v3
+      with:
+        name: jniLibs-all-architectures
+        path: jniLibs/
